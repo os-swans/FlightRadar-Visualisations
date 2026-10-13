@@ -24,7 +24,7 @@ Re-running the same command resumes from the checkpoint (`fr24_state.db`). Never
 python filter_flights_by_region.py --input kepler_flights.csv --output africa.csv --continent Africa
 ```
 
-Also supports `--countries "Ghana,Kenya"` and `--origin-only`.
+Also supports `--countries "Sudan, Venezuela"` and `--origin-only`.
 
 ## Load into Kepler.gl
 
