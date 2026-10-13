@@ -2,64 +2,74 @@
 """
 fr24_kepler_export.py
 
-Pulls historical flight-track data from the Flightradar24 API for a list of
-aircraft and exports it to a CSV formatted for import into Kepler.gl.
+Pulls historical flight-track data from the Flightradar24 (FR24) API for a
+list of aircraft registrations and writes it to a CSV that can be loaded
+straight into Kepler.gl (https://kepler.gl/demo).
 
-Output schema (matches kepler_flights.csv):
+Output columns:
     lat, lon, time_filter, datetime_display, altitude, airline, registration, flight_id
+
+How it works
+  1. Discovery: finds every flight for your registrations in the date range
+     (FR24 "flight summary" endpoint, billed per flight returned).
+  2. Tracks: downloads the full position track for each flight found
+     (FR24 "flight tracks" endpoint, billed per call), and appends the points
+     to the output CSV.
+
+REQUIREMENTS
+  Python 3.9+, the `requests` package, and an FR24 API token with credits.
+  Set the token as an environment variable (never write it into a file):
+    macOS / Linux:        export FR24_API_TOKEN="your_token_here"
+    Windows PowerShell:   $env:FR24_API_TOKEN="your_token_here"
+    Windows cmd:          set FR24_API_TOKEN=your_token_here
+
+AIRCRAFT LIST
+  A CSV with two columns, `registration` and `airline`. The airline value is
+  a free-text label written into the output so you can colour by it in Kepler.
+  Lines starting with # in the registration column are ignored.
 
 USAGE
 
-  Fixed date-range backfill (one-off):
-    python fr24_kepler_export.py \
-        --aircraft-csv aircraft_list.csv \
-        --mode fixed --from 2023-01-01 --to 2026-01-31 \
-        --output kepler_flights.csv
+  Fixed date range (one-off backfill):
+    python fr24_kepler_export.py --aircraft-csv aircraft_list.csv --mode fixed --from 2024-11-01 --output kepler_flights.csv
 
-  Rolling window (repeat runs, e.g. daily cron -- only pulls flights since
-  the last successful run per aircraft):
-    python fr24_kepler_export.py \
-        --aircraft-csv aircraft_list.csv \
-        --mode rolling --rolling-hours 24 \
-        --output kepler_flights.csv
+  Rolling window (repeat runs, e.g. a daily scheduled job; each run only
+  pulls flights since the last successful run for each aircraft):
+    python fr24_kepler_export.py --aircraft-csv aircraft_list.csv --mode rolling --rolling-hours 24 --output kepler_flights.csv
 
-  Estimate cost before spending any credits on flight-tracks:
-    python fr24_kepler_export.py \
-        --aircraft-csv aircraft_list.csv \
-        --mode fixed --from 2023-01-01 --to 2026-01-31 \
-        --dry-run
+  Discovery only (runs step 1, reports how many flights would need tracks and
+  the estimated credit cost, then stops before step 2):
+    python fr24_kepler_export.py --aircraft-csv aircraft_list.csv --mode fixed --from 2024-11-01 --dry-run
 
-CONFIGURATION
+  Note: --dry-run is not free. Discovery is billed per flight found.
 
-  Set your FR24 API token:
-    export FR24_API_TOKEN="your_token_here"
+  Cap spending:
+    Add --max-credits N to stop before the estimated spend exceeds N credits.
+    Set N to your real credit balance.
 
-  !! VERIFY BEFORE A REAL RUN !!
-  This targets the official FR24 API (fr24api.flightradar24.com). Endpoint
-  paths, param names, response field names, and credit costs below are
-  built from the documented structure as of my knowledge cutoff (Jan 2026)
-  and may have drifted. Before spending real credits:
-    1. Check https://fr24api.flightradar24.com/docs (or your dashboard's
-       API reference) against the FR24_ENDPOINTS / field-name constants
-       just below the imports.
-    2. Confirm the actual credit cost per call in your dashboard and update
-       CREDIT_COST_SUMMARY_CALL / CREDIT_COST_TRACK_CALL accordingly --
-       the --max-credits safety guard is only as good as these numbers.
-    3. Run once with --dry-run first. It only calls flight-summary (cheap,
-       discovery-only) and reports how many individual flight-tracks calls
-       the full run would make and what that would cost at your configured
-       per-call credit rates -- before any track data (the expensive part)
-       is pulled.
+  Pull specific aircraft first (useful if credits might run out):
+    Add --priority-regs REG1,REG2
+
+DATE LIMITS
+  Your FR24 plan limits how far back you can query. A start date exactly on that limit is rejected with a 400 error, so
+  start a few days inside it.
+
+COSTS
+  The credit constants near the top of this file (CREDIT_COST_*) are
+  estimates used only for --max-credits and the discovery summary. Check them
+  against your FR24 pricing and your own credit balance and adjust if needed.
+  The tracks cost in particular is an average and may vary with how many
+  points each flight returns.
 
 STATE / CHECKPOINTING
-  Progress is recorded in a local SQLite file (--state-db, default
-  fr24_state.db) next to the output CSV:
-    - which (registration, date-window) summary calls have been made
-    - which flight_ids have had their tracks pulled already
-    - the last successfully-covered timestamp per registration (rolling mode)
-  Re-running the script (after a crash, Ctrl-C, or on a schedule) will skip
-  work already recorded here rather than re-spending credits on it. Delete
-  the state DB (or use a fresh --state-db) to force a full re-pull.
+  Progress is saved in a local SQLite file (--state-db, default fr24_state.db):
+    - which (registration, date window) discovery calls have been made
+    - which flights have had their tracks downloaded
+    - the last covered timestamp per registration (rolling mode)
+  If the script stops (error, Ctrl-C, out of credits), run the same command
+  again and it resumes without re-spending credits on finished work. Delete
+  the state file, or use a new --state-db, to start from scratch. Use a
+  separate --state-db and --output for each separate aircraft list.
 """
 
 import argparse
@@ -78,25 +88,26 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # --------------------------------------------------------------------------
-# CONFIG -- verify against current FR24 API docs before a real run
+# CONFIG
+# Endpoint paths, field names and credit costs are collected here so they are
+# easy to adjust if the FR24 API changes. See https://fr24api.flightradar24.com/docs
 # --------------------------------------------------------------------------
 
 FR24_BASE_URL = "https://fr24api.flightradar24.com"
 
 FR24_ENDPOINTS = {
     # Discovery: list flights matching registrations within a date window.
-    # "light" is the cheaper variant -- returns fr24_id + basic timing, not
-    # the full route/aircraft-type payload. Swap to /api/flight-summary/full
-    # if you need more fields and don't mind the higher credit cost.
+    # "light" is the cheaper variant: it returns the flight ID and basic
+    # timing, not the full route/aircraft-type payload. Use
+    # /api/flight-summary/full if you need more fields and accept the higher cost.
     "flight_summary": "/api/flight-summary/light",
     # Full point-by-point track for a single flight.
     "flight_tracks": "/api/flight-tracks",
 }
 
-FR24_API_VERSION = "v1"  # sent as the Accept-Version header (confirmed working in a prior script)
+FR24_API_VERSION = "v1"  # sent as the Accept-Version header
 
-# Field names expected in API responses -- adjust here if the schema has
-# changed rather than hunting through the request functions below.
+# Field names expected in API responses. Adjust here if the schema changes.
 SUMMARY_FIELDS = {
     "flight_id": "fr24_id",
     "registration": "reg",
@@ -110,22 +121,20 @@ TRACK_FIELDS = {
     "altitude": "alt",
 }
 
-# Credit costs per call -- PLACEHOLDERS. Check your FR24 dashboard for the
-# real per-call/per-record cost and update these before trusting
-# --max-credits or the --dry-run estimate.
-CREDIT_COST_SUMMARY_PER_FLIGHT = 3  # flight-summary/light, historic >30 days old (confirmed from FR24 pricing docs)
-CREDIT_COST_TRACK_CALL = 40  # observed: ~600k credits bought ~15,000 flight-tracks calls (~416 points/flight avg). Likely scales with points returned, so treat as an average, not a fixed rate
+# Estimated credit costs, used for --max-credits and the cost summary.
+# Check them against your FR24 pricing and your own credit balance.
+CREDIT_COST_SUMMARY_PER_FLIGHT = 3  # flight-summary/light for flights older than 30 days, per flight returned
+CREDIT_COST_TRACK_CALL = 40  # flight-tracks, per call. An average: the real cost may vary with the number of points returned
 
-# Max registrations to batch into a single flight-summary call. FR24 allows
-# comma-separated registrations in one request -- batching cuts credit
-# spend vs one call per aircraft. Lower this if you hit request-size limits.
+# Max registrations to batch into a single flight-summary call (FR24 accepts
+# comma-separated registrations). Lower this if you hit request-size limits.
 SUMMARY_BATCH_SIZE = 15
 
-# Max days per flight-summary date window. Large ranges are chunked into
-# windows this wide so a single call doesn't get truncated server-side.
+# Max days per flight-summary date window. Long ranges are split into windows
+# of this size so a single response is not truncated.
 SUMMARY_WINDOW_DAYS = 7
 
-# Seconds to sleep between API calls (basic rate limiting).
+# Seconds to wait between API calls (basic rate limiting).
 REQUEST_DELAY_SECONDS = 0.5
 
 CSV_COLUMNS = [
@@ -174,7 +183,7 @@ class Fr24Client:
         self.session.headers.update({
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
-            "Accept-Version": FR24_API_VERSION,  # confirmed working header name from a prior working script — reverted from an "API-Version" guess based on ambiguous docs phrasing
+            "Accept-Version": FR24_API_VERSION,
         })
         self.credit_guard = credit_guard
 
@@ -198,9 +207,8 @@ class Fr24Client:
 
     def flight_summary(self, registrations, dt_from, dt_to):
         """registrations: list of tail numbers (batched into one call).
-        Billed per flight RETURNED (confirmed from FR24 pricing docs: 3
-        credits/flight for light+historic>30days), not per call -- so we
-        charge after seeing the response, not before."""
+        Billed per flight returned, not per call, so the credit guard is
+        charged after the response arrives."""
         params = {
             "registrations": ",".join(registrations),
             "flight_datetime_from": dt_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -215,10 +223,7 @@ class Fr24Client:
         return results
 
     def flight_tracks(self, flight_id):
-        # Charged per call as a conservative stand-in -- the real FR24
-        # pricing model bills per result, same shape as flight-summary, but
-        # no official per-flight-tracks number has been confirmed. Update
-        # this to match once you've checked a real credit-balance delta.
+        # Charged per call using the CREDIT_COST_TRACK_CALL estimate.
         self.credit_guard.charge(CREDIT_COST_TRACK_CALL, f"flight-tracks {flight_id}")
         params = {"flight_id": flight_id}
         data = self._get(FR24_ENDPOINTS["flight_tracks"], params)
@@ -374,9 +379,8 @@ def discover_flights(client, con, aircraft, dt_from, dt_to, dry_run):
     pending = []
     for w_from, w_to in windows:
         for batch in chunked(all_regs, SUMMARY_BATCH_SIZE):
-            # Skip whole-batch shortcut isn't safe (per-registration
-            # checkpointing), so filter down to regs not yet covered for
-            # this exact window.
+            # Checkpointing is per registration, so only query the ones not
+            # yet covered for this exact window.
             todo = [r for r in batch if not window_already_fetched(con, r, w_from, w_to)]
             if not todo:
                 continue
@@ -408,12 +412,9 @@ def discover_flights(client, con, aircraft, dt_from, dt_to, dry_run):
             seen.add(fid)
             unique_pending.append((fid, reg, airline))
 
-    # Also pick up flights already known from a PREVIOUS run's discovery
-    # (checkpointed windows we skipped above) that haven't had their tracks
-    # pulled yet. Without this, re-running after a dry-run or an interrupted
-    # pull only processes whatever's newly discovered this run, silently
-    # leaving previously-discovered flights stuck in "known but never
-    # pulled" limbo.
+    # Also queue flights discovered in an earlier run (their windows are
+    # checkpointed and skipped above) whose tracks have not been downloaded
+    # yet, so a resumed or post-dry-run command still pulls them.
     placeholders = ",".join("?" * len(all_regs))
     rows = con.execute(
         f"""
@@ -433,7 +434,7 @@ def discover_flights(client, con, aircraft, dt_from, dt_to, dry_run):
 
 
 def parse_track_timestamp(raw):
-    """Returns (unix_ms, display_string) from whatever FR24 gives us."""
+    """Returns (unix_ms, display_string) from an epoch-seconds number or ISO8601 string."""
     if isinstance(raw, (int, float)):
         # assume epoch seconds
         dt = datetime.fromtimestamp(raw, tz=timezone.utc)
@@ -508,9 +509,9 @@ def parse_args():
                     help="Rolling mode: lookback window on first run per aircraft")
 
     p.add_argument("--max-credits", type=int, default=None,
-                    help="Abort before spending more than this many credits (see CREDIT_COST_* constants)")
+                    help="Stop before the estimated spend exceeds this many credits (see CREDIT_COST_* constants). Set to your real balance")
     p.add_argument("--dry-run", action="store_true",
-                    help="Run discovery (flight-summary) only, report the estimated cost of pulling tracks, and exit without spending credits on flight-tracks")
+                    help="Run discovery only, report the estimated cost of pulling tracks, and exit. Discovery still uses credits")
 
     p.add_argument("--priority-regs",
                     help="Comma-separated registrations to pull tracks for FIRST (so they're covered if credits run out)")
