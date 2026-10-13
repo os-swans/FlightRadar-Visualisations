@@ -3,14 +3,9 @@
 filter_flights_by_region.py
 
 Keeps entire flight paths for any flight_id that had AT LEAST ONE point
-inside the target region -- not just the points that fall inside it. This
-matters for movement-pattern analysis: a flight from Moscow to Bamako
-should show its whole route, not get truncated at the coastline.
+inside the target region -- not just the points that fall inside it.
 
-Region boundary comes from Natural Earth's public country dataset (real
-country polygons unioned by continent), not a rough bounding box -- so
-edge cases like southern Turkey or the Arabian Peninsula are classified
-correctly rather than approximately.
+Region boundaries comes from Natural Earth's public country dataset.
 
 USAGE
     python filter_flights_by_region.py --input kepler_flights.csv \
@@ -19,11 +14,11 @@ USAGE
     Other valid --continent values from this dataset: Asia, Europe,
     "North America", "South America", Oceania, Antarctica.
 
-    For something other than a whole continent (e.g. just the Sahel
+    For something other than a whole continent (e.g. a few named
     countries), use --countries instead:
         python filter_flights_by_region.py --input kepler_flights.csv \
-            --output kepler_flights_sahel.csv \
-            --countries "Mali,Burkina Faso,Niger"
+            --output kepler_flights_selected.csv \
+            --countries "France,Germany,Spain"
 """
 
 import argparse
@@ -86,7 +81,7 @@ def main():
     p.add_argument("--input", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--continent", help="e.g. Africa, Asia, Europe")
-    p.add_argument("--countries", help='Comma-separated country names, e.g. "Mali,Burkina Faso,Niger"')
+    p.add_argument("--countries", help='Comma-separated country names, e.g. "France,Germany,Spain"')
     p.add_argument("--origin-only", action="store_true",
                     help="Only keep flights whose FIRST tracked point (by time_filter) falls in the region, "
                          "instead of any point. Use this for 'flights that originated in X' rather than "
