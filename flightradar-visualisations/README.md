@@ -24,14 +24,13 @@ Re-running the same command resumes from the checkpoint (`fr24_state.db`). Never
 python filter_flights_by_region.py --input kepler_flights.csv --output africa.csv --continent Africa
 ```
 
-Also supports `--countries "Ghana,Kenya"` and `--origin-only`.
+Also supports `--countries "Sudan, Ethiopia, Venezuela, etc"` and `--origin-only`.
 
 ## Load into Kepler.gl
 
-Open kepler.gl/demo, drag in the CSV, add a Trip layer using `flight_id` and `time_filter`, and colour by `airline`.
+Open kepler.gl/demo, drag in the CSV, and immediately change the points size to a small number (1-3). Play around with the filters try colouring by altitude, airline, or registration number.
 
 ## Notes
 
-- Credit costs are estimates: about 3 credits per flight discovered, about 40 per track pull.
-- History is limited by your plan (rolling 24 months); start a few days inside the limit.
-- Full step-by-step guide: add your link here.
+- Credit costs are estimates.
+- History is limited by your plan; start a few days inside the limit.
