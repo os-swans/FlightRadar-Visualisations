@@ -1,0 +1,10 @@
+# Secrets and local data
+.env
+*.db
+kepler_flights*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+fr24-env/
