@@ -33,5 +33,4 @@ Open kepler.gl/demo, drag in the CSV, add a Trip layer using `flight_id` and `ti
 ## Notes
 
 - Credit costs are estimates: about 3 credits per flight discovered, about 40 per track pull.
-- History is limited by your plan (rolling 24 months); start a few days inside the limit.
-- Full step-by-step guide: add your link here.
+- History is limited by your plan; start a few days inside the limit.
