@@ -28,7 +28,7 @@ Also supports `--countries "Sudan, Venezuela"` and `--origin-only`.
 
 ## Load into Kepler.gl
 
-Open kepler.gl/demo, drag in the CSV, add a Trip layer using `flight_id` and `time_filter`, and colour by `airline`.
+Open kepler.gl/demo, drag in the CSV, and change the size of the points to a small number (1-3). Play around with the filters and colour by `airline` or altitude.
 
 ## Notes
 
